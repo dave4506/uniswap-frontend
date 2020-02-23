@@ -25,6 +25,7 @@ import { transparentize } from 'polished'
 import { Spinner } from '../../theme'
 import Circle from '../../assets/images/circle-grey.svg'
 import { useETHPriceInUSD, useAllBalances } from '../../contexts/Balances'
+import { ZERO_EX_ASSET_PROXY_ADDRESSES } from '../../constants';
 
 const GAS_MARGIN = ethers.utils.bigNumberify(1000)
 
@@ -284,14 +285,14 @@ export default function CurrencyInputPanel({
   disableTokenSelect,
   selectedTokenAddress = '',
   showUnlock,
-  value
+  value,
+  filteredOutTokens = [],
 }) {
   const { t } = useTranslation()
 
   const [modalIsOpen, setModalIsOpen] = useState(false)
 
   const tokenContract = useTokenContract(selectedTokenAddress)
-  const { exchangeAddress: selectedTokenExchangeAddress } = useTokenDetails(selectedTokenAddress)
 
   const pendingApproval = usePendingApproval(selectedTokenAddress)
 
@@ -314,18 +315,18 @@ export default function CurrencyInputPanel({
               let estimatedGas
               let useUserBalance = false
               estimatedGas = await tokenContract.estimate
-                .approve(selectedTokenExchangeAddress, ethers.constants.MaxUint256)
+                .approve(ZERO_EX_ASSET_PROXY_ADDRESSES.ERC20, ethers.constants.MaxUint256)
                 .catch(e => {
                   console.log('Error setting max token approval.')
                 })
               if (!estimatedGas) {
                 // general fallback for tokens who restrict approval amounts
-                estimatedGas = await tokenContract.estimate.approve(selectedTokenExchangeAddress, userTokenBalance)
+                estimatedGas = await tokenContract.estimate.approve(ZERO_EX_ASSET_PROXY_ADDRESSES.ERC20, userTokenBalance)
                 useUserBalance = true
               }
               tokenContract
                 .approve(
-                  selectedTokenExchangeAddress,
+                  ZERO_EX_ASSET_PROXY_ADDRESSES.ERC20,
                   useUserBalance ? userTokenBalance : ethers.constants.MaxUint256,
                   {
                     gasLimit: calculateGasMargin(estimatedGas, GAS_MARGIN)
@@ -433,13 +434,14 @@ export default function CurrencyInputPanel({
           }}
           onTokenSelect={onCurrencySelected}
           allBalances={allBalances}
+          filteredOutTokens={filteredOutTokens}
         />
       )}
     </InputPanel>
   )
 }
 
-function CurrencySelectModal({ isOpen, onDismiss, onTokenSelect }) {
+function CurrencySelectModal({ filteredOutTokens, isOpen, onDismiss, onTokenSelect }) {
   const { t } = useTranslation()
 
   const [searchQuery, setSearchQuery] = useState('')
@@ -551,9 +553,11 @@ function CurrencySelectModal({ isOpen, onDismiss, onTokenSelect }) {
         )
       })
 
-      return regexMatches.some(m => m)
+      return regexMatches.some(m => m) 
+      && (!filteredOutTokens.includes(tokenEntry.address)
+      || !filteredOutTokens.includes(tokenEntry.symbol));
     })
-  }, [tokenList, searchQuery])
+  }, [filteredOutTokens, tokenList, searchQuery])
 
   function _onTokenSelect(address) {
     setSearchQuery('')

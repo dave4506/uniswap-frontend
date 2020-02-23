@@ -4,6 +4,7 @@ import { createBrowserHistory } from 'history'
 import { ethers } from 'ethers'
 import styled from 'styled-components'
 import { useTranslation } from 'react-i18next'
+import axios from 'axios';
 
 import { Button } from '../../theme'
 import { useWeb3React } from '../../hooks'
@@ -20,12 +21,12 @@ import { useAddressBalance, useExchangeReserves } from '../../contexts/Balances'
 import { useAddressAllowance } from '../../contexts/Allowances'
 import { useWalletModalToggle } from '../../contexts/Application'
 import { useETHPriceInUSD } from '../../contexts/Balances'
+import { ZERO_EX_API_BASE_URL, ZERO_EX_API_ENDPTS, ZERO_EX_ASSET_PROXY_ADDRESSES, WETH_ADDRESS } from '../../constants';
 
 const INPUT = 0
 const OUTPUT = 1
 
 const ETH_TO_TOKEN = 0
-const TOKEN_TO_ETH = 1
 const TOKEN_TO_TOKEN = 2
 
 // denominated in bips
@@ -97,30 +98,13 @@ function getSwapType(inputCurrency, outputCurrency) {
     return null
   } else if (inputCurrency === 'ETH') {
     return ETH_TO_TOKEN
-  } else if (outputCurrency === 'ETH') {
-    return TOKEN_TO_ETH
   } else {
     return TOKEN_TO_TOKEN
   }
 }
 
-// this mocks the getInputPrice function, and calculates the required output
-function calculateEtherTokenOutputFromInput(inputAmount, inputReserve, outputReserve) {
-  const inputAmountWithFee = inputAmount.mul(ethers.utils.bigNumberify(997))
-  const numerator = inputAmountWithFee.mul(outputReserve)
-  const denominator = inputReserve.mul(ethers.utils.bigNumberify(1000)).add(inputAmountWithFee)
-  return numerator.div(denominator)
-}
-
-// this mocks the getOutputPrice function, and calculates the required input
-function calculateEtherTokenInputFromOutput(outputAmount, inputReserve, outputReserve) {
-  const numerator = inputReserve.mul(outputAmount).mul(ethers.utils.bigNumberify(1000))
-  const denominator = outputReserve.sub(outputAmount).mul(ethers.utils.bigNumberify(997))
-  return numerator.div(denominator).add(ethers.constants.One)
-}
-
 function getInitialSwapState(state) {
-  return {
+  const initialState = {
     independentValue: state.exactFieldURL && state.exactAmountURL ? state.exactAmountURL : '', // this is a user input
     dependentValue: '', // this is a calculated number
     independentField: state.exactFieldURL === 'output' ? OUTPUT : INPUT,
@@ -133,24 +117,26 @@ function getInitialSwapState(state) {
         : state.outputCurrencyURL
       : state.initialCurrency
       ? state.initialCurrency
-      : ''
+      : '',
   }
+  initialState.wasInputEth = initialState.inputCurrency === 'ETH'
+  return initialState
 }
 
 function swapStateReducer(state, action) {
   switch (action.type) {
     case 'FLIP_INDEPENDENT': {
-      const { independentField, inputCurrency, outputCurrency } = state
+      const { independentField, inputCurrency, outputCurrency, wasInputEth } = state
       return {
         ...state,
         dependentValue: '',
         independentField: independentField === INPUT ? OUTPUT : INPUT,
-        inputCurrency: outputCurrency,
-        outputCurrency: inputCurrency
+        inputCurrency: outputCurrency === WETH_ADDRESS && wasInputEth ? 'ETH' : outputCurrency,
+        outputCurrency: inputCurrency === 'ETH' ? WETH_ADDRESS : inputCurrency,
       }
     }
     case 'SELECT_CURRENCY': {
-      const { inputCurrency, outputCurrency } = state
+      const { inputCurrency, outputCurrency, wasInputEth } = state
       const { field, currency } = action.payload
 
       const newInputCurrency = field === INPUT ? currency : inputCurrency
@@ -160,13 +146,15 @@ function swapStateReducer(state, action) {
         return {
           ...state,
           inputCurrency: field === INPUT ? currency : '',
-          outputCurrency: field === OUTPUT ? currency : ''
+          outputCurrency: field === OUTPUT ? currency : '',
+          wasInputEth: field === INPUT ? inputCurrency === 'ETH' : wasInputEth,
         }
       } else {
         return {
           ...state,
           inputCurrency: newInputCurrency,
-          outputCurrency: newOutputCurrency
+          outputCurrency: newOutputCurrency,
+          wasInputEth: field === INPUT ? inputCurrency === 'ETH' : wasInputEth,
         }
       }
     }
@@ -231,8 +219,6 @@ function getMarketRate(
 ) {
   if (swapType === ETH_TO_TOKEN) {
     return getExchangeRate(outputReserveETH, 18, outputReserveToken, outputDecimals, invert)
-  } else if (swapType === TOKEN_TO_ETH) {
-    return getExchangeRate(inputReserveToken, inputDecimals, inputReserveETH, 18, invert)
   } else if (swapType === TOKEN_TO_TOKEN) {
     const factor = ethers.utils.bigNumberify(10).pow(ethers.utils.bigNumberify(18))
     const firstRate = getExchangeRate(inputReserveToken, inputDecimals, inputReserveETH, 18)
@@ -243,9 +229,33 @@ function getMarketRate(
   }
 }
 
+async function fetchZeroExAPIQuoteAsync(sellToken, buyToken, amount, isBuy=true, account) {
+  const res = await axios.get(`${ZERO_EX_API_BASE_URL}${ZERO_EX_API_ENDPTS.SWAP}`, {
+    params: {
+      sellToken,
+      buyToken,
+      takerAddress: account,
+      buyAmount: isBuy ? amount.toString() : undefined,
+      sellAmount: !isBuy ? amount.toString() : undefined,
+    }
+  });
+  return res.data;
+}
+
 export default function ExchangePage({ initialCurrency, sending = false, params }) {
   const { t } = useTranslation()
-  const { account, error } = useWeb3React()
+  const { account, error, active, connector } = useWeb3React();
+
+  const [ signerInstance, setSignerInstance ] = useState();
+
+  useEffect(() => {
+    connector.getProvider().then(provider => {
+      const ethersProvider = new ethers.providers.Web3Provider(provider);
+      const signer = ethersProvider.getSigner();
+      setSignerInstance(signer);
+    })
+  }, [active, connector])
+
 
   // BigNumber.js instance
   const ethPrice = useETHPriceInUSD()
@@ -320,7 +330,7 @@ export default function ExchangePage({ initialCurrency, sending = false, params 
   const contract = swapType === ETH_TO_TOKEN ? outputExchangeContract : inputExchangeContract
 
   // get input allowance
-  const inputAllowance = useAddressAllowance(account, inputCurrency, inputExchangeAddress)
+  const inputAllowance = useAddressAllowance(account, inputCurrency, ZERO_EX_ASSET_PROXY_ADDRESSES.ERC20);
 
   // fetch reserves for each of the currency types
   const { reserveETH: inputReserveETH, reserveToken: inputReserveToken } = useExchangeReserves(inputCurrency)
@@ -408,109 +418,14 @@ export default function ExchangePage({ initialCurrency, sending = false, params 
   useEffect(() => {
     const amount = independentValueParsed
 
-    if (swapType === ETH_TO_TOKEN) {
-      const reserveETH = outputReserveETH
-      const reserveToken = outputReserveToken
-
-      if (amount && reserveETH && reserveToken) {
-        try {
-          const calculatedDependentValue =
-            independentField === INPUT
-              ? calculateEtherTokenOutputFromInput(amount, reserveETH, reserveToken)
-              : calculateEtherTokenInputFromOutput(amount, reserveETH, reserveToken)
-
-          if (calculatedDependentValue.lte(ethers.constants.Zero)) {
-            throw Error()
-          }
-
-          dispatchSwapState({
-            type: 'UPDATE_DEPENDENT',
-            payload: calculatedDependentValue
-          })
-        } catch {
-          setIndependentError(t('insufficientLiquidity'))
-        }
-        return () => {
-          dispatchSwapState({ type: 'UPDATE_DEPENDENT', payload: '' })
-        }
-      }
-    } else if (swapType === TOKEN_TO_ETH) {
-      const reserveETH = inputReserveETH
-      const reserveToken = inputReserveToken
-
-      if (amount && reserveETH && reserveToken) {
-        try {
-          const calculatedDependentValue =
-            independentField === INPUT
-              ? calculateEtherTokenOutputFromInput(amount, reserveToken, reserveETH)
-              : calculateEtherTokenInputFromOutput(amount, reserveToken, reserveETH)
-
-          if (calculatedDependentValue.lte(ethers.constants.Zero)) {
-            throw Error()
-          }
-
-          dispatchSwapState({
-            type: 'UPDATE_DEPENDENT',
-            payload: calculatedDependentValue
-          })
-        } catch {
-          setIndependentError(t('insufficientLiquidity'))
-        }
-        return () => {
-          dispatchSwapState({ type: 'UPDATE_DEPENDENT', payload: '' })
-        }
-      }
-    } else if (swapType === TOKEN_TO_TOKEN) {
-      const reserveETHFirst = inputReserveETH
-      const reserveTokenFirst = inputReserveToken
-
-      const reserveETHSecond = outputReserveETH
-      const reserveTokenSecond = outputReserveToken
-
-      if (amount && reserveETHFirst && reserveTokenFirst && reserveETHSecond && reserveTokenSecond) {
-        try {
-          if (independentField === INPUT) {
-            const intermediateValue = calculateEtherTokenOutputFromInput(amount, reserveTokenFirst, reserveETHFirst)
-            if (intermediateValue.lte(ethers.constants.Zero)) {
-              throw Error()
-            }
-            const calculatedDependentValue = calculateEtherTokenOutputFromInput(
-              intermediateValue,
-              reserveETHSecond,
-              reserveTokenSecond
-            )
-            if (calculatedDependentValue.lte(ethers.constants.Zero)) {
-              throw Error()
-            }
-            dispatchSwapState({
-              type: 'UPDATE_DEPENDENT',
-              payload: calculatedDependentValue
-            })
-          } else {
-            const intermediateValue = calculateEtherTokenInputFromOutput(amount, reserveETHSecond, reserveTokenSecond)
-            if (intermediateValue.lte(ethers.constants.Zero)) {
-              throw Error()
-            }
-            const calculatedDependentValue = calculateEtherTokenInputFromOutput(
-              intermediateValue,
-              reserveTokenFirst,
-              reserveETHFirst
-            )
-            if (calculatedDependentValue.lte(ethers.constants.Zero)) {
-              throw Error()
-            }
-            dispatchSwapState({
-              type: 'UPDATE_DEPENDENT',
-              payload: calculatedDependentValue
-            })
-          }
-        } catch {
-          setIndependentError(t('insufficientLiquidity'))
-        }
-        return () => {
-          dispatchSwapState({ type: 'UPDATE_DEPENDENT', payload: '' })
-        }
-      }
+    if (!!amount && inputCurrency !== '' && outputCurrency !== '') {
+      (async ()=> {
+        const quote = await fetchZeroExAPIQuoteAsync(inputCurrency, outputCurrency, amount, independentField === OUTPUT);
+        dispatchSwapState({
+          type: 'UPDATE_DEPENDENT',
+          payload: ethers.utils.bigNumberify(independentField === INPUT ? quote.buyAmount : quote.sellAmount),
+        })
+      })();
     }
   }, [
     independentValueParsed,
@@ -520,7 +435,9 @@ export default function ExchangePage({ initialCurrency, sending = false, params 
     inputReserveETH,
     inputReserveToken,
     independentField,
-    t
+    t,
+    inputCurrency,
+    outputCurrency,
   ])
 
   useEffect(() => {
@@ -620,13 +537,6 @@ export default function ExchangePage({ initialCurrency, sending = false, params 
         method = sending ? contract.ethToTokenTransferInput : contract.ethToTokenSwapInput
         args = sending ? [dependentValueMinumum, deadline, recipient.address] : [dependentValueMinumum, deadline]
         value = independentValueParsed
-      } else if (swapType === TOKEN_TO_ETH) {
-        estimate = sending ? contract.estimate.tokenToEthTransferInput : contract.estimate.tokenToEthSwapInput
-        method = sending ? contract.tokenToEthTransferInput : contract.tokenToEthSwapInput
-        args = sending
-          ? [independentValueParsed, dependentValueMinumum, deadline, recipient.address]
-          : [independentValueParsed, dependentValueMinumum, deadline]
-        value = ethers.constants.Zero
       } else if (swapType === TOKEN_TO_TOKEN) {
         estimate = sending ? contract.estimate.tokenToTokenTransferInput : contract.estimate.tokenToTokenSwapInput
         method = sending ? contract.tokenToTokenTransferInput : contract.tokenToTokenSwapInput
@@ -656,13 +566,6 @@ export default function ExchangePage({ initialCurrency, sending = false, params 
         method = sending ? contract.ethToTokenTransferOutput : contract.ethToTokenSwapOutput
         args = sending ? [independentValueParsed, deadline, recipient.address] : [independentValueParsed, deadline]
         value = dependentValueMaximum
-      } else if (swapType === TOKEN_TO_ETH) {
-        estimate = sending ? contract.estimate.tokenToEthTransferOutput : contract.estimate.tokenToEthSwapOutput
-        method = sending ? contract.tokenToEthTransferOutput : contract.tokenToEthSwapOutput
-        args = sending
-          ? [independentValueParsed, dependentValueMaximum, deadline, recipient.address]
-          : [independentValueParsed, dependentValueMaximum, deadline]
-        value = ethers.constants.Zero
       } else if (swapType === TOKEN_TO_TOKEN) {
         estimate = sending ? contract.estimate.tokenToTokenTransferOutput : contract.estimate.tokenToTokenSwapOutput
         method = sending ? contract.tokenToTokenTransferOutput : contract.tokenToTokenSwapOutput
@@ -680,11 +583,17 @@ export default function ExchangePage({ initialCurrency, sending = false, params 
       }
     }
 
-    const estimatedGasLimit = await estimate(...args, { value })
-    method(...args, {
-      value,
-      gasLimit: calculateGasMargin(estimatedGasLimit, GAS_MARGIN)
-    }).then(response => {
+    fetchZeroExAPIQuoteAsync(inputCurrency, outputCurrency, independentValueParsed, independentField === OUTPUT, account)
+    .then(quote => {
+      return signerInstance.sendTransaction({
+        to: quote.to,
+        gasLimit: ethers.utils.bigNumberify(quote.gas),
+        gasPrice: ethers.utils.bigNumberify(quote.gasPrice),
+        data: quote.data,
+        value: ethers.utils.bigNumberify(quote.value),
+      });
+    })
+    .then(response => {
       addTransaction(response)
     })
   }
@@ -764,6 +673,7 @@ export default function ExchangePage({ initialCurrency, sending = false, params 
         value={outputValueFormatted}
         errorMessage={independentField === OUTPUT ? independentError : ''}
         disableUnlock
+        filteredOutTokens={['ETH']}
       />
       {sending ? (
         <>

@@ -92,3 +92,15 @@ export const brokenTokens = [
 ]
 
 export const NetworkContextName = 'NETWORK'
+
+export const ZERO_EX_ASSET_PROXY_ADDRESSES = {
+  ERC20: '0x95e6f48254609a6ee006f7d493c8e5fb97094cef',
+};
+
+export const WETH_ADDRESS = '0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2';
+
+export const ZERO_EX_API_BASE_URL = 'https://api.0x.org/';
+
+export const ZERO_EX_API_ENDPTS = {
+  SWAP: 'swap/v0/quote'
+};
