@@ -60,12 +60,12 @@ export default function Header() {
           <Nod>
             <Link id="link" href="https://uniswap.io">
               <span role="img" aria-label="unicorn">
-                🦄{'  '}
+                🌊{'  '}
               </span>
             </Link>
           </Nod>
           <Link id="link" href="https://uniswap.io">
-            <h1 id="title">Uniswap</h1>
+            <h1 id="title">MultiSwap</h1>
           </Link>
         </Title>
       </HeaderElement>
